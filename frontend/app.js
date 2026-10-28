@@ -5,10 +5,103 @@
   let bearerToken = null;
   let toastTimer;
   const pretty = obj => JSON.stringify(obj, null, 2);
-  function toast(message, isError=false) {
-    const el = $('toast'); el.textContent = message; el.className = 'toast show' + (isError ? ' error' : '');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.className = 'toast', 2800);
+
+  // Center-screen success/error popup used by the Authorization flows and other UI actions.
+  // Styles are injected here so this replacement file works without editing style.css.
+  function ensurePopupStyles() {
+    if ($('centerPopupStyles')) return;
+    const style = document.createElement('style');
+    style.id = 'centerPopupStyles';
+    style.textContent = `
+      #toast.center-popup-overlay {
+        position: fixed; inset: 0; z-index: 9999; display: flex;
+        align-items: center; justify-content: center; padding: 22px;
+        background: rgba(15, 20, 38, .48); backdrop-filter: blur(4px);
+        opacity: 0; visibility: hidden; pointer-events: none;
+        transition: opacity .18s ease, visibility .18s ease;
+        max-width: none; width: 100%; height: 100%; box-sizing: border-box;
+        right: auto; bottom: auto; transform: none; border-radius: 0;
+      }
+      #toast.center-popup-overlay.popup-visible {
+        opacity: 1; visibility: visible; pointer-events: auto;
+      }
+      #toast .center-popup-card {
+        position: relative; width: min(100%, 410px); box-sizing: border-box;
+        padding: 30px 26px 24px; border-radius: 18px; background: #fff;
+        color: #20263a; text-align: center; box-shadow: 0 24px 80px rgba(12, 18, 40, .28);
+        border-top: 5px solid #16a36a; animation: popupIn .2s ease-out;
+      }
+      #toast.popup-error .center-popup-card { border-top-color: #dc3545; }
+      #toast .center-popup-icon {
+        display: grid; place-items: center; width: 58px; height: 58px;
+        margin: 0 auto 15px; border-radius: 50%; background: #e7f8ef;
+        color: #12834f; font: 700 30px/1 system-ui, sans-serif;
+      }
+      #toast.popup-error .center-popup-icon { background: #ffebed; color: #c92a3a; }
+      #toast .center-popup-title { margin: 0 0 9px; font: 800 20px/1.3 system-ui, sans-serif; }
+      #toast .center-popup-message { margin: 0; color: #5c6476; font: 14px/1.6 system-ui, sans-serif; overflow-wrap: anywhere; }
+      #toast .center-popup-close {
+        margin-top: 22px; min-width: 110px; border: 0; border-radius: 9px;
+        padding: 11px 20px; background: #15965e; color: #fff; cursor: pointer;
+        font: 700 13px system-ui, sans-serif;
+      }
+      #toast.popup-error .center-popup-close { background: #d93649; }
+      #toast .center-popup-close:focus-visible { outline: 3px solid #8b91ff; outline-offset: 3px; }
+      @keyframes popupIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+      @media (prefers-reduced-motion: reduce) { #toast.center-popup-overlay, #toast .center-popup-card { animation: none; transition: none; } }
+    `;
+    document.head.appendChild(style);
   }
+
+  function closeToast() {
+    const el = $('toast');
+    if (!el) return;
+    el.classList.remove('popup-visible', 'popup-error');
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = '';
+    clearTimeout(toastTimer);
+  }
+
+  function toast(message, isError=false) {
+    const el = $('toast');
+    if (!el) return;
+    ensurePopupStyles();
+    clearTimeout(toastTimer);
+    el.className = 'toast center-popup-overlay' + (isError ? ' popup-error' : '');
+    el.setAttribute('role', 'alertdialog');
+    el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-hidden', 'false');
+
+    const card = document.createElement('div');
+    card.className = 'center-popup-card';
+    const icon = document.createElement('div');
+    icon.className = 'center-popup-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = isError ? '!' : '✓';
+    const title = document.createElement('h2');
+    title.className = 'center-popup-title';
+    title.textContent = isError ? 'Something went wrong' : 'Success';
+    const text = document.createElement('p');
+    text.className = 'center-popup-message';
+    text.textContent = String(message);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'center-popup-close';
+    close.textContent = 'OK';
+    close.addEventListener('click', closeToast);
+    card.append(icon, title, text, close);
+    el.replaceChildren(card);
+    requestAnimationFrame(() => {
+      el.classList.add('popup-visible');
+      close.focus();
+    });
+    // Auto-dismiss after a few seconds, while allowing users to close it immediately.
+    toastTimer = setTimeout(closeToast, 3600);
+  }
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && $('toast')?.classList.contains('popup-visible')) closeToast();
+  });
   async function api(path, options={}) {
     const headers = {'Content-Type':'application/json', ...(options.headers || {})};
     const res = await fetch(API + path, {...options, headers});
