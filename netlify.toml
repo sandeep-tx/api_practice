@@ -1,0 +1,4 @@
+[build]
+  publish = "frontend"
+
+# Netlify serves the static frontend only. Configure frontend/config.js with your deployed Flask API URL.
