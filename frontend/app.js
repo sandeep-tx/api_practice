@@ -4,6 +4,9 @@
   let currentSessionId = null;
   let bearerToken = null;
   let toastTimer;
+  const TOKEN_STORAGE_KEY = 'api_practice_lab_access_token';
+  const AUTH_USER_STORAGE_KEY = 'api_practice_lab_auth_user';
+  const AUTH_EXPIRES_STORAGE_KEY = 'api_practice_lab_auth_expires_at';
   const pretty = obj => JSON.stringify(obj, null, 2);
 
   // Center-screen success/error popup used by the Authorization flows and other UI actions.
@@ -103,10 +106,18 @@
     if (event.key === 'Escape' && $('toast')?.classList.contains('popup-visible')) closeToast();
   });
   async function api(path, options={}) {
+    // Real-project style: attach the stored Bearer token by default. Login/OTP
+    // bootstrap calls intentionally remain unauthenticated.
     const headers = {'Content-Type':'application/json', ...(options.headers || {})};
+    const isAuthBootstrap = ['/api/auth/login', '/api/auth/otp/send', '/api/auth/otp/get', '/api/auth/otp/verify'].includes(path);
+    if (bearerToken && !isAuthBootstrap && !headers.Authorization && !headers.authorization) {
+      headers.Authorization = `Bearer ${bearerToken}`;
+    }
     const res = await fetch(API + path, {...options, headers});
     const raw = await res.text(); let data;
     try { data = raw ? JSON.parse(raw) : {}; } catch { data = {raw}; }
+    // A rejected stored token should not leave the UI falsely authenticated.
+    if (res.status === 401 && bearerToken && !isAuthBootstrap) clearAuthState('Session expired or token is invalid. Please log in again.');
     return {res, data};
   }
   function showResponse(status, data) {
@@ -148,13 +159,84 @@
   $('getOtpHint').onclick=async()=>{if(!currentSessionId)return;try{const {res,data}=await api('/api/auth/otp/get',{method:'POST',body:JSON.stringify({session_id:currentSessionId})});showResponse(res.status,data);if(!res.ok)throw new Error(data.error);$('otpHint').textContent=`Practice OTP: ${data.otp} · Expires in ${data.expires_in_seconds}s`;$('otpHint').classList.remove('hidden');$('otpInput').value=data.otp;toast('OTP retrieved using session_id');}catch(err){toast(err.message,true);}};
   $('otpLoginForm').addEventListener('submit',async e=>{e.preventDefault();if(!currentSessionId){toast('Get OTP first',true);return;}try{const {res,data}=await api('/api/auth/otp/verify',{method:'POST',body:JSON.stringify({session_id:currentSessionId,otp:$('otpInput').value.trim()})});showResponse(res.status,data);if(!res.ok)throw new Error(data.error);setToken(data);toast('OTP login successful');}catch(err){toast(err.message,true);}});
   $('passwordForm').addEventListener('submit',async e=>{e.preventDefault();try{const {res,data}=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email:$('loginEmail').value,password:$('loginPassword').value})});showResponse(res.status,data);if(!res.ok)throw new Error(data.error);setToken(data);toast('API login successful');}catch(err){toast(err.message,true);}});
-  function setToken(data){bearerToken=data.token;$('tokenValue').textContent=bearerToken;$('tokenValue').classList.add('has-token');$('tokenState').textContent='Active';$('tokenState').style.color='#15956e';$('authBadge').textContent=`Bearer · ${data.user.auth_method}`;$('authBadge').classList.add('active');['copyToken','checkMe','logoutBtn','protectedRequest'].forEach(id=>$(id).disabled=false);$('authMessage').textContent=`Authenticated via ${data.user.auth_method}. Token expires in ${data.expires_in_seconds/60} minutes.`;$('authMessage').classList.remove('hidden');}
+  function setToken(data){
+    if (!data || !data.token) throw new Error('Login succeeded but the API response did not include a token.');
+    bearerToken = data.token;
+    const user = data.user || {};
+    const expiresAt = Date.now() + (Number(data.expires_in_seconds) || 3600) * 1000;
+    // localStorage mirrors a common browser-based application pattern and survives refreshes.
+    try {
+      localStorage.setItem(TOKEN_STORAGE_KEY, bearerToken);
+      localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
+      localStorage.setItem(AUTH_EXPIRES_STORAGE_KEY, String(expiresAt));
+    } catch (storageError) {
+      console.warn('Could not persist the token in localStorage; keeping it in memory for this page only.', storageError);
+    }
+    renderAuthState(user, expiresAt);
+  }
+  function renderAuthState(user={}, expiresAt=null){
+    if (!bearerToken) return;
+    $('tokenValue').textContent = bearerToken;
+    $('tokenValue').classList.add('has-token');
+    $('tokenState').textContent = 'Active'; $('tokenState').style.color = '#15956e';
+    $('authBadge').textContent = `Bearer · ${user.auth_method || 'restored'}`; $('authBadge').classList.add('active');
+    ['copyToken','checkMe','logoutBtn','protectedRequest'].forEach(id=>$(id).disabled=false);
+    const expiryText = expiresAt ? new Date(Number(expiresAt)).toLocaleString() : 'determined by the API';
+    $('authMessage').textContent = `Authenticated${user.auth_method ? ` via ${user.auth_method}` : ''}. Token stored in browser localStorage. Expires around ${expiryText}.`;
+    $('authMessage').classList.remove('hidden');
+  }
+  function clearAuthState(message='Signed out. Please log in again.'){
+    bearerToken = null;
+    try { localStorage.removeItem(TOKEN_STORAGE_KEY); localStorage.removeItem(AUTH_USER_STORAGE_KEY); localStorage.removeItem(AUTH_EXPIRES_STORAGE_KEY); } catch {}
+    $('tokenValue').textContent = message; $('tokenValue').classList.remove('has-token');
+    $('tokenState').textContent = 'Signed out'; $('tokenState').style.color = '';
+    $('authBadge').textContent = 'No token'; $('authBadge').classList.remove('active');
+    ['copyToken','checkMe','logoutBtn','protectedRequest'].forEach(id=>$(id).disabled=true);
+    $('authMessage').classList.add('hidden');
+  }
+  async function restoreAuthState(){
+    let storedToken = null, storedUser = {}, expiresAt = null;
+    try {
+      storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+      storedUser = JSON.parse(localStorage.getItem(AUTH_USER_STORAGE_KEY) || '{}');
+      expiresAt = localStorage.getItem(AUTH_EXPIRES_STORAGE_KEY);
+    } catch (e) { console.warn('Could not read saved auth state from localStorage.', e); }
+    if (!storedToken) return;
+    if (expiresAt && Number(expiresAt) <= Date.now()) { clearAuthState('Saved session expired. Please log in again.'); return; }
+    bearerToken = storedToken;
+    renderAuthState(storedUser, expiresAt);
+    try {
+      const {res,data} = await api('/api/auth/me');
+      if (res.ok) {
+        $('protectedOutput').textContent = pretty(data);
+        $('authMessage').textContent = `Restored browser session and validated token with GET /api/auth/me. ${expiresAt ? `Expires around ${new Date(Number(expiresAt)).toLocaleString()}.` : ''}`;
+        $('authMessage').classList.remove('hidden');
+      } else {
+        clearAuthState('Saved token was rejected. Please log in again.');
+      }
+    } catch (e) { $('authMessage').textContent = 'Token is saved in localStorage, but the API could not be reached to validate it.'; }
+  }
   $('copyToken').onclick=()=>copyText(bearerToken||'');
-  async function protectedCall(path='/api/auth/me', method='GET'){if(!bearerToken)return;try{const {res,data}=await api(path,{method,headers:{Authorization:`Bearer ${bearerToken}`},...(method==='POST'?{body:'{}'}:{})});$('protectedOutput').textContent=pretty(data);if(!res.ok)throw new Error(data.error);toast('Protected API returned '+res.status);}catch(e){toast(e.message,true);}}
-  $('checkMe').onclick=()=>protectedCall();$('protectedRequest').onclick=()=>protectedCall();
-  $('logoutBtn').onclick=async()=>{try{const {res,data}=await api('/api/auth/logout',{method:'POST',headers:{Authorization:`Bearer ${bearerToken}`},body:'{}'});$('protectedOutput').textContent=pretty(data);if(!res.ok)throw new Error(data.error);bearerToken=null;$('tokenValue').textContent='Logged out. Login again to generate a token.';$('tokenValue').classList.remove('has-token');$('tokenState').textContent='Signed out';$('tokenState').style.color='';$('authBadge').textContent='No token';$('authBadge').classList.remove('active');['copyToken','checkMe','logoutBtn','protectedRequest'].forEach(id=>$(id).disabled=true);$('authMessage').classList.add('hidden');toast('Logged out');}catch(e){toast(e.message,true);}};
+  async function protectedCall(path='/api/auth/me', method='GET'){
+    if(!bearerToken){toast('Please log in first to create a Bearer token.',true);return;}
+    try{const {res,data}=await api(path,{method,...(method==='POST'?{body:'{}'}:{})});$('protectedOutput').textContent=pretty(data);if(!res.ok)throw new Error(data.error || `HTTP ${res.status}`);toast('Protected API returned '+res.status);}
+    catch(e){toast(e.message,true);}
+  }
+  $('checkMe').onclick=()=>protectedCall(); $('protectedRequest').onclick=()=>protectedCall();
+  $('logoutBtn').onclick=async()=>{
+    if(!bearerToken){clearAuthState();return;}
+    try{const {res,data}=await api('/api/auth/logout',{method:'POST',body:'{}'});$('protectedOutput').textContent=pretty(data);if(!res.ok)throw new Error(data.error || `HTTP ${res.status}`);clearAuthState('Logged out. Login again to generate a token.');toast('Logged out; token removed from browser localStorage.');}
+    catch(e){toast(e.message,true);}
+  };
+  // Keep tabs in sync if the user logs out or changes token in another same-origin tab.
+  window.addEventListener('storage', event => {
+    if (event.key === TOKEN_STORAGE_KEY) {
+      if (event.newValue) { bearerToken = event.newValue; restoreAuthState(); }
+      else if (bearerToken) clearAuthState('Session was cleared in another tab.');
+    }
+  });
   $('copyBaseUrl').onclick=()=>copyText(API||location.origin);
   document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>copyText(b.dataset.copy==='email'?$('demoEmail').textContent:$('demoPassword').textContent));
   async function copyText(text){try{await navigator.clipboard.writeText(text);toast('Copied to clipboard');}catch{toast('Copy not available in this browser',true);}}
-  checkHealth(); refreshItems();
+  checkHealth(); refreshItems(); restoreAuthState();
 })();
